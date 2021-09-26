@@ -33,25 +33,64 @@ pub enum ComponentError {
     OOM,
     GpioError(gpio::GpioError),
     NotEnoughMemory,
+    ConversionError,
 }
 
-
+#[derive(PartialEq, Eq)]
+enum Component {
+    InputGpio(InputGpio),
+    OutputGpio(OutputGpio),
+}
 pub trait Components {
     fn get_input_pin(&self, index: &InputGpioIndex) -> Result<&InputGpio, ComponentError>;
     fn get_output_pin(&self, index: &OutputGpioIndex) -> Result<&mut OutputGpio, ComponentError>;
 }
 
-pub enum ArrayState<const OPCount: usize, const IPCount: usize> {
-    Unsorted(ComponentsArrays<OPCount, IPCount>),
-    Sorted(ComponentsArrays<OPCount, IPCount>),
+pub enum ArrayState<const COMPONENT_COUNT: usize> {
+    Unsorted(ComponentsArray<COMPONENT_COUNT>),
+    Sorted(ComponentsArray<COMPONENT_COUNT>),
 }
-pub struct ComponentsArrays<const OPCount: usize, const IPCount: usize> {
-    outputPins: [Option<OutputGpio>; OPCount],
-    inputPins: [Option<InputGpio>; IPCount],
+pub struct ComponentsArray<const COMPONENT_COUNT: usize>([Option<Component>; COMPONENT_COUNT]);
+
+impl Component {
+    /// The Ordering should be as follows Gpios < None
+    /// Gpios are ordered as the Gpio type without respect to Gpio-Kind (In, Out, etc.)
+    fn comperator(this: &Option<Self>, other: &Option<Self>) -> Ordering {
+        match other {
+            Some(Component::InputGpio(other)) => Component::compare_with_gpio(this, &other.0),
+            Some(Component::OutputGpio(other)) => Component::compare_with_gpio(this, &other.0),
+            None => Component::compare_with_none(this),
+        }
+    }
+    #[inline]
+    fn compare_with_none(this: &Option<Self>) -> Ordering {
+        match this {
+            Some(_) => Ordering::Less,
+            None => Ordering::Equal,
+        }
+    }
+    #[inline]
+    fn compare_with_gpio(this: &Option<Self>, other: &Gpio) -> Ordering {
+        match this {
+            Some(this) => match this.to_gpio() {
+                Ok(gpio) => gpio.cmp(other),
+                Err(_) => Ordering::Greater,
+            },
+            None => Ordering::Greater,
+        }
+    }
+    #[inline]
+    fn to_gpio(&self) -> Result<&Gpio, ComponentError> {
+        match self {
+            Component::InputGpio(gpio) => Ok(&gpio.0),
+            Component::OutputGpio(gpio) => Ok(&gpio.0),
+            _ => Err(ComponentError::ConversionError),
+        }
+    }
 }
 
-impl<const OPCount: usize, const IPCount: usize> ComponentsArrays<OPCount, IPCount> {
-    unsafe fn new(memory: &'static mut [u8]) -> Result<Self, ComponentError> {
+impl<const COMPONENT_COUNT: usize> ComponentsArray<COMPONENT_COUNT> {
+    pub unsafe fn new(memory: &'static mut [u8]) -> Result<Self, ComponentError> {
         let size_difference = Self::size_difference(size_of_val(memory));
         if size_difference < 0 {
             return Err(ComponentError::NotEnoughMemory);
@@ -63,33 +102,31 @@ impl<const OPCount: usize, const IPCount: usize> ComponentsArrays<OPCount, IPCou
                 );
             }
         }
-        let outputPins
-        todo!()
+        
     }
 
     fn size_difference(byte_count: usize) -> isize {
-        let nedded = (size_of::<Option<InputGpio>>() * IPCount)
-            + (size_of::<Option<OutputGpio>>() * OPCount);
+        let nedded = size_of::<Option<Component>>() * COMPONENT_COUNT;
         byte_count as isize - nedded as isize
     }
 }
 
-impl<const OPCount: usize, const IPCount: usize> ArrayState<OPCount, IPCount> {
-    fn new(arrays: ComponentsArrays<OPCount, IPCount>) -> Self {
+impl<const COMPONENT_COUNT: usize> ArrayState<COMPONENT_COUNT> {
+    pub fn new(arrays: ComponentsArray<COMPONENT_COUNT>) -> Self {
         ArrayState::Unsorted(arrays)
     }
-    fn get_sorted_array(&self) -> Result<&ComponentsArrays<OPCount, IPCount>, ComponentError> {
+    fn get_sorted_array(&self) -> Result<&ComponentsArray<COMPONENT_COUNT>, ComponentError> {
         match self {
             ArrayState::Unsorted(_) => Err(ComponentError::EarlyAccessAction),
             ArrayState::Sorted(a) => Ok(a),
         }
     }
-    fn get_sorted_array_mut(
+    fn get_unsorted_array(
         &mut self,
-    ) -> Result<&mut ComponentsArrays<OPCount, IPCount>, ComponentError> {
+    ) -> Result<&mut ComponentsArray<COMPONENT_COUNT>, ComponentError> {
         match self {
-            ArrayState::Unsorted(_) => Err(ComponentError::EarlyAccessAction),
-            ArrayState::Sorted(a) => Ok(a),
+            ArrayState::Sorted(_) => Err(ComponentError::LateInitAction),
+            ArrayState::Unsorted(a) => Ok(a),
         }
     }
     pub fn add_input_pin<T>(&mut self, gpio: &'static mut T) -> Result<(), ComponentError>
@@ -97,56 +134,70 @@ impl<const OPCount: usize, const IPCount: usize> ArrayState<OPCount, IPCount> {
         Gpio: FromRef<T>,
         T: InputPin<Error = GpioInError>,
     {
-        match self {
-            ArrayState::Unsorted(a) => {
-                for elem in &mut a.inputPins {
-                    if elem.is_none() {
-                        elem.replace(InputGpio(Gpio::from_ref(gpio), gpio));
-                        return Ok(());
-                    }
-                }
-                Err(ComponentError::OOM)
+        for elem in &mut self.get_unsorted_array()?.0 {
+            if elem.is_none() {
+                elem.replace(Component::InputGpio(InputGpio(Gpio::from_ref(gpio), gpio)));
+                return Ok(());
             }
-            ArrayState::Sorted(_) => Err(ComponentError::LateInitAction),
         }
+        Err(ComponentError::OOM)
+    }
+    pub fn add_output_pin<T>(&mut self, gpio: &'static mut T) -> Result<(), ComponentError>
+    where
+        Gpio: FromRef<T>,
+        T: OutputPin<Error = GpioOutError>,
+    {
+        for elem in &mut self.get_unsorted_array()?.0 {
+            if elem.is_none() {
+                elem.replace(Component::OutputGpio(OutputGpio(
+                    Gpio::from_ref(gpio),
+                    gpio,
+                )));
+                return Ok(());
+            }
+        }
+        Err(ComponentError::OOM)
     }
     pub fn get_input_pin(&self, pin: Pin, port: Port) -> Result<InputGpioIndex, ComponentError> {
         let gpio = Gpio { pin, port };
-        search_array(&self.get_sorted_array()?.inputPins, &gpio, |v| &v.0)
-            .map(|index| InputGpioIndex(index as u8))
+        let index = self.search_array(&gpio, Component::compare_with_gpio)?;
+        // check if the gpio kind actually matches
+        match self.get_sorted_array()?.0[index] {
+            Some(Component::InputGpio(_)) => Ok(InputGpioIndex(index as u8)),
+            Some(_) => Err(ComponentError::NotFound),
+            None => Err(ComponentError::NotFound),
+        }
     }
     pub fn get_output_pin(&self, pin: Pin, port: Port) -> Result<OutputGpioIndex, ComponentError> {
         let gpio = Gpio { pin, port };
-        search_array(&self.get_sorted_array()?.outputPins, &gpio, |v| &v.0)
-            .map(|index| OutputGpioIndex(index as u8))
+        let index = self.search_array(&gpio, Component::compare_with_gpio)?;
+        // check if the gpio kind actually matches
+        match self.get_sorted_array()?.0[index] {
+            Some(Component::OutputGpio(_)) => Ok(OutputGpioIndex(index as u8)),
+            Some(_) => Err(ComponentError::NotFound),
+            None => Err(ComponentError::NotFound),
+        }
     }
-    pub fn finalize(self) -> ArrayState<OPCount, IPCount> {
+    /// Search for a key in the component array, with a functin f that can conmpare the key with componetns
+    fn search_array<K>(
+        &self,
+        key: &K,
+        f: fn(&Option<Component>, &K) -> Ordering,
+    ) -> Result<usize, ComponentError> {
+        self.get_sorted_array()?
+            .0
+            .binary_search_by(|value| f(value, key))
+            .map_err(|_| ComponentError::NotFound)
+    }
+    pub fn finalize(self) -> ArrayState<COMPONENT_COUNT> {
         match self {
             ArrayState::Unsorted(mut a) => {
-                a.outputPins.sort_unstable();
-                a.inputPins.sort_unstable();
+                a.0.sort_unstable_by(|this, other| Component::comperator(this, other));
                 ArrayState::Sorted(a)
             }
             ArrayState::Sorted(_) => self,
         }
     }
-}
-
-/// Search for an Option encloses value in an array, where the value can be converted into a key with function f
-fn search_array<K, V>(
-    array: &[Option<V>],
-    key: &K,
-    f: fn(&V) -> &K,
-) -> Result<usize, ComponentError>
-where
-    K: Ord,
-{
-    array
-        .binary_search_by(|probe| match probe {
-            Some(value) => f(value).cmp(key),
-            None => Ordering::Less,
-        })
-        .map_err(|_| ComponentError::NotFound)
 }
 
 impl From<GpioError> for ComponentError {
