@@ -1,0 +1,15 @@
+[package]
+edition = "2018"
+name = "embedded-rust-h2al"
+version = "0.1.0"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+embedded-hal = {version = "0.2.4", features = ["unproven"]}
+stm32f1xx-hal = {version = "0.7.0", features = ["stm32f103", "rt", "medium"]}
+log = "0.4.14"
+
+[features]
+default = ["stm32f1xx"]
+stm32f1xx = []
