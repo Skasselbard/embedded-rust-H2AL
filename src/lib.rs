@@ -4,8 +4,7 @@ mod device;
 mod gpio;
 
 use core::cmp::Ordering;
-use core::mem::size_of;
-use core::mem::size_of_val;
+use once_cell::unsync::OnceCell;
 
 use device::GpioInError;
 use device::GpioOutError;
@@ -31,26 +30,23 @@ pub enum ComponentError {
     EarlyAccessAction,
     NotFound,
     OOM,
-    GpioError(gpio::GpioError),
+    GpioError(GpioError),
     NotEnoughMemory,
     ConversionError,
 }
 
 #[derive(PartialEq, Eq)]
-enum Component {
+pub enum Component {
     InputGpio(InputGpio),
     OutputGpio(OutputGpio),
 }
-pub trait Components {
-    fn get_input_pin(&self, index: &InputGpioIndex) -> Result<&InputGpio, ComponentError>;
-    fn get_output_pin(&self, index: &OutputGpioIndex) -> Result<&mut OutputGpio, ComponentError>;
-}
 
-pub enum ArrayState<const COMPONENT_COUNT: usize> {
-    Unsorted(ComponentsArray<COMPONENT_COUNT>),
-    Sorted(ComponentsArray<COMPONENT_COUNT>),
-}
-pub struct ComponentsArray<const COMPONENT_COUNT: usize>([Option<Component>; COMPONENT_COUNT]);
+#[derive(PartialEq, Eq, Debug, Copy, Clone, PartialOrd, Ord, Hash)]
+struct ComponentIndex(pub(crate) u8);
+#[repr(transparent)]
+pub struct Components(&'static mut [Option<Component>]);
+
+pub struct ComponentsBuilder(&'static mut [Option<Component>]);
 
 impl Component {
     /// The Ordering should be as follows Gpios < None
@@ -89,52 +85,16 @@ impl Component {
     }
 }
 
-impl<const COMPONENT_COUNT: usize> ComponentsArray<COMPONENT_COUNT> {
-    pub unsafe fn new(memory: &'static mut [u8]) -> Result<Self, ComponentError> {
-        let size_difference = Self::size_difference(size_of_val(memory));
-        if size_difference < 0 {
-            return Err(ComponentError::NotEnoughMemory);
-        } else {
-            if size_difference > 0 {
-                log::warn!(
-                    "memory for components array is {} bytes to large",
-                    size_difference
-                );
-            }
-        }
-        
-    }
-
-    fn size_difference(byte_count: usize) -> isize {
-        let nedded = size_of::<Option<Component>>() * COMPONENT_COUNT;
-        byte_count as isize - nedded as isize
-    }
-}
-
-impl<const COMPONENT_COUNT: usize> ArrayState<COMPONENT_COUNT> {
-    pub fn new(arrays: ComponentsArray<COMPONENT_COUNT>) -> Self {
-        ArrayState::Unsorted(arrays)
-    }
-    fn get_sorted_array(&self) -> Result<&ComponentsArray<COMPONENT_COUNT>, ComponentError> {
-        match self {
-            ArrayState::Unsorted(_) => Err(ComponentError::EarlyAccessAction),
-            ArrayState::Sorted(a) => Ok(a),
-        }
-    }
-    fn get_unsorted_array(
-        &mut self,
-    ) -> Result<&mut ComponentsArray<COMPONENT_COUNT>, ComponentError> {
-        match self {
-            ArrayState::Sorted(_) => Err(ComponentError::LateInitAction),
-            ArrayState::Unsorted(a) => Ok(a),
-        }
+impl ComponentsBuilder {
+    pub fn new(array: &'static mut [Option<Component>]) -> Self {
+        ComponentsBuilder(array)
     }
     pub fn add_input_pin<T>(&mut self, gpio: &'static mut T) -> Result<(), ComponentError>
     where
         Gpio: FromRef<T>,
         T: InputPin<Error = GpioInError>,
     {
-        for elem in &mut self.get_unsorted_array()?.0 {
+        for elem in self.0.iter_mut() {
             if elem.is_none() {
                 elem.replace(Component::InputGpio(InputGpio(Gpio::from_ref(gpio), gpio)));
                 return Ok(());
@@ -147,7 +107,7 @@ impl<const COMPONENT_COUNT: usize> ArrayState<COMPONENT_COUNT> {
         Gpio: FromRef<T>,
         T: OutputPin<Error = GpioOutError>,
     {
-        for elem in &mut self.get_unsorted_array()?.0 {
+        for elem in self.0.iter_mut() {
             if elem.is_none() {
                 elem.replace(Component::OutputGpio(OutputGpio(
                     Gpio::from_ref(gpio),
@@ -158,50 +118,64 @@ impl<const COMPONENT_COUNT: usize> ArrayState<COMPONENT_COUNT> {
         }
         Err(ComponentError::OOM)
     }
-    pub fn get_input_pin(&self, pin: Pin, port: Port) -> Result<InputGpioIndex, ComponentError> {
+    pub fn finalize(self) -> &'static mut Components {
+        self.0
+            .sort_unstable_by(|this, other| Component::comperator(this, other));
+        Components::static_array()
+            .set(self.0)
+            .map_err(|_| Err::<(), ()>(()))
+            .expect("Multible Component initialization");
+        Components::get_static()
+    }
+}
+
+impl Components {
+    fn static_array() -> &'static mut OnceCell<&'static mut [Option<Component>]> {
+        static mut ARRAY: OnceCell<&mut [Option<Component>]> = OnceCell::new();
+        unsafe { &mut ARRAY }
+    }
+    fn get_static() -> &'static mut Self {
+        let array = Self::static_array()
+            .get_mut()
+            .expect("Tried to access uninitialized Components");
+        // its the same pointer as the array pointer since the type representation of Self is 'transparent'
+        // https://doc.rust-lang.org/1.41.1/reference/type-layout.html#representations
+        unsafe { &mut *(*array as *mut [Option<Component>] as *mut Self) }
+    }
+    fn get(index: ComponentIndex) -> Result<&'static mut Component, ComponentError> {
+        match Self::get_static().0[index.0 as usize].as_mut() {
+            Some(c) => Ok(c),
+            None => Err(ComponentError::NotFound),
+        }
+    }
+    pub fn get_input_pin(pin: Pin, port: Port) -> Result<InputGpioIndex, ComponentError> {
         let gpio = Gpio { pin, port };
-        let index = self.search_array(&gpio, Component::compare_with_gpio)?;
+        let index = Self::search_array(&gpio, Component::compare_with_gpio)?;
         // check if the gpio kind actually matches
-        match self.get_sorted_array()?.0[index] {
-            Some(Component::InputGpio(_)) => Ok(InputGpioIndex(index as u8)),
+        match Self::get_static().0[index] {
+            Some(Component::InputGpio(_)) => Ok(InputGpioIndex(ComponentIndex(index as u8))),
             Some(_) => Err(ComponentError::NotFound),
             None => Err(ComponentError::NotFound),
         }
     }
-    pub fn get_output_pin(&self, pin: Pin, port: Port) -> Result<OutputGpioIndex, ComponentError> {
+    pub fn get_output_pin(pin: Pin, port: Port) -> Result<OutputGpioIndex, ComponentError> {
         let gpio = Gpio { pin, port };
-        let index = self.search_array(&gpio, Component::compare_with_gpio)?;
+        let index = Self::search_array(&gpio, Component::compare_with_gpio)?;
         // check if the gpio kind actually matches
-        match self.get_sorted_array()?.0[index] {
-            Some(Component::OutputGpio(_)) => Ok(OutputGpioIndex(index as u8)),
+        match Self::get_static().0[index] {
+            Some(Component::OutputGpio(_)) => Ok(OutputGpioIndex(ComponentIndex(index as u8))),
             Some(_) => Err(ComponentError::NotFound),
             None => Err(ComponentError::NotFound),
         }
     }
     /// Search for a key in the component array, with a functin f that can conmpare the key with componetns
     fn search_array<K>(
-        &self,
         key: &K,
         f: fn(&Option<Component>, &K) -> Ordering,
     ) -> Result<usize, ComponentError> {
-        self.get_sorted_array()?
+        Self::get_static()
             .0
             .binary_search_by(|value| f(value, key))
             .map_err(|_| ComponentError::NotFound)
-    }
-    pub fn finalize(self) -> ArrayState<COMPONENT_COUNT> {
-        match self {
-            ArrayState::Unsorted(mut a) => {
-                a.0.sort_unstable_by(|this, other| Component::comperator(this, other));
-                ArrayState::Sorted(a)
-            }
-            ArrayState::Sorted(_) => self,
-        }
-    }
-}
-
-impl From<GpioError> for ComponentError {
-    fn from(e: GpioError) -> Self {
-        ComponentError::GpioError(e)
     }
 }

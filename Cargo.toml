@@ -7,8 +7,9 @@ version = "0.1.0"
 
 [dependencies]
 embedded-hal = {version = "0.2.4", features = ["unproven"]}
-stm32f1xx-hal = {version = "0.7.0", features = ["stm32f103", "rt", "medium"]}
 log = "0.4.14"
+once_cell = {version = "1.4.0"}
+stm32f1xx-hal = {version = "0.7.0", features = ["stm32f103", "rt", "medium"]}
 
 [features]
 default = ["stm32f1xx"]

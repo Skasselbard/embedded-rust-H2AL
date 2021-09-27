@@ -1,11 +1,9 @@
-use embedded_hal::digital::{
-    v2::{InputPin, OutputPin},
-    
-};
+use embedded_hal::digital::v2::{InputPin, OutputPin};
 
 use crate::{
     device::{GpioInError, GpioOutError, Pin, Port},
-    ComponentError, Components};
+    ComponentError, ComponentIndex, Components,
+};
 
 #[derive(PartialEq, Eq, Debug, Hash)]
 pub enum GpioError {
@@ -14,9 +12,11 @@ pub enum GpioError {
 }
 
 #[derive(PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
-pub struct InputGpioIndex(pub(crate) u8);
+pub struct InputGpioIndex(pub(crate) ComponentIndex);
+
 #[derive(PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
-pub struct OutputGpioIndex(pub(crate) u8);
+pub struct OutputGpioIndex(pub(crate) ComponentIndex);
+
 #[derive(PartialEq, Eq, Debug, Clone, PartialOrd, Ord, Hash)]
 pub struct Gpio {
     pub(super) port: Port,
@@ -33,38 +33,42 @@ pub struct OutputGpio(
 );
 
 impl InputGpioIndex {
-    pub fn is_high(&self, components: &dyn Components) -> Result<bool, ComponentError> {
-        components
-            .get_input_pin(self)?
-            .1
-            .is_high()
-            .map_err(|e| GpioError::In(e).into())
+    pub fn is_high(&self) -> Result<bool, ComponentError> {
+        match Components::get(self.0)? {
+            crate::Component::InputGpio(gpio) => {
+                gpio.1.is_high().map_err(|e| GpioError::In(e).into())
+            }
+            _ => Err(ComponentError::NotFound),
+        }
     }
 
-    pub fn is_low(&self, components: &dyn Components) -> Result<bool, ComponentError> {
-        components
-            .get_input_pin(self)?
-            .1
-            .is_low()
-            .map_err(|e| GpioError::In(e).into())
+    pub fn is_low(&self) -> Result<bool, ComponentError> {
+        match Components::get(self.0)? {
+            crate::Component::InputGpio(gpio) => {
+                gpio.1.is_low().map_err(|e| GpioError::In(e).into())
+            }
+            _ => Err(ComponentError::NotFound),
+        }
     }
 }
 
 impl OutputGpioIndex {
-    pub fn set_high(&self, components: &dyn Components) -> Result<(), ComponentError> {
-        components
-            .get_output_pin(self)?
-            .1
-            .set_high()
-            .map_err(|e| GpioError::Out(e).into())
+    pub fn set_high(&self) -> Result<(), ComponentError> {
+        match Components::get(self.0)? {
+            crate::Component::OutputGpio(gpio) => {
+                gpio.1.set_high().map_err(|e| GpioError::In(e).into())
+            }
+            _ => Err(ComponentError::NotFound),
+        }
     }
 
-    pub fn set_low(&self, components: &dyn Components) -> Result<(), ComponentError> {
-        components
-            .get_output_pin(self)?
-            .1
-            .set_low()
-            .map_err(|e| GpioError::Out(e).into())
+    pub fn set_low(&self) -> Result<(), ComponentError> {
+        match Components::get(self.0)? {
+            crate::Component::OutputGpio(gpio) => {
+                gpio.1.set_low().map_err(|e| GpioError::In(e).into())
+            }
+            _ => Err(ComponentError::NotFound),
+        }
     }
 }
 
@@ -92,3 +96,9 @@ macro_rules! implement_gpio_cmp_traits {
 
 implement_gpio_cmp_traits!(InputGpio);
 implement_gpio_cmp_traits!(OutputGpio);
+
+impl From<GpioError> for ComponentError {
+    fn from(e: GpioError) -> Self {
+        ComponentError::GpioError(e)
+    }
+}
