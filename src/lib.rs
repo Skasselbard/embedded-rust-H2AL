@@ -1,17 +1,18 @@
 #![no_std]
+#![feature(maybe_uninit_uninit_array)]
+#![feature(maybe_uninit_slice)]
 
 mod device;
 mod gpio;
 
 use core::cmp::Ordering;
+use core::mem::MaybeUninit;
+use gpio::InputPin;
+use gpio::OutputPin;
 use once_cell::unsync::OnceCell;
 
-use device::GpioInError;
-use device::GpioOutError;
 use device::Pin;
 use device::Port;
-use embedded_hal::digital::v2::InputPin;
-use embedded_hal::digital::v2::OutputPin;
 use gpio::Gpio;
 use gpio::GpioError;
 use gpio::InputGpio;
@@ -43,135 +44,131 @@ pub enum Component {
 
 #[derive(PartialEq, Eq, Debug, Copy, Clone, PartialOrd, Ord, Hash)]
 struct ComponentIndex(pub(crate) u8);
+/// functions are unsafe because no concurrency safeties are guaranteed.
+/// Its your responsibility to synchronize component access.
 #[repr(transparent)]
-pub struct Components(&'static mut [Option<Component>]);
+pub struct Components(&'static mut [Component]);
 
-pub struct ComponentsBuilder(&'static mut [Option<Component>]);
+pub struct ComponentsBuilder<const COMPONENT_COUNT: usize> {
+    array: &'static mut [MaybeUninit<Component>; COMPONENT_COUNT],
+    space: usize,
+}
 
 impl Component {
     /// The Ordering should be as follows Gpios < None
     /// Gpios are ordered as the Gpio type without respect to Gpio-Kind (In, Out, etc.)
-    fn comperator(this: &Option<Self>, other: &Option<Self>) -> Ordering {
+    fn comparator(&self, other: &Self) -> Ordering {
         match other {
-            Some(Component::InputGpio(other)) => Component::compare_with_gpio(this, &other.0),
-            Some(Component::OutputGpio(other)) => Component::compare_with_gpio(this, &other.0),
-            None => Component::compare_with_none(this),
+            Component::InputGpio(other) => Component::compare_with_gpio(self, &other.0.to_gpio()),
+            Component::OutputGpio(other) => Component::compare_with_gpio(self, &other.0.to_gpio()),
         }
     }
     #[inline]
-    fn compare_with_none(this: &Option<Self>) -> Ordering {
-        match this {
-            Some(_) => Ordering::Less,
-            None => Ordering::Equal,
+    fn compare_with_gpio(&self, other: &Gpio) -> Ordering {
+        match self.to_gpio() {
+            Ok(gpio) => gpio.cmp(other),
+            Err(_) => Ordering::Greater,
         }
     }
     #[inline]
-    fn compare_with_gpio(this: &Option<Self>, other: &Gpio) -> Ordering {
-        match this {
-            Some(this) => match this.to_gpio() {
-                Ok(gpio) => gpio.cmp(other),
-                Err(_) => Ordering::Greater,
-            },
-            None => Ordering::Greater,
-        }
-    }
-    #[inline]
-    fn to_gpio(&self) -> Result<&Gpio, ComponentError> {
+    fn to_gpio(&self) -> Result<Gpio, ComponentError> {
         match self {
-            Component::InputGpio(gpio) => Ok(&gpio.0),
-            Component::OutputGpio(gpio) => Ok(&gpio.0),
+            Component::InputGpio(gpio) => Ok(gpio.0.to_gpio()),
+            Component::OutputGpio(gpio) => Ok(gpio.0.to_gpio()),
             _ => Err(ComponentError::ConversionError),
         }
     }
 }
 
-impl ComponentsBuilder {
-    pub fn new(array: &'static mut [Option<Component>]) -> Self {
-        ComponentsBuilder(array)
+impl<const COMPONENT_COUNT: usize> ComponentsBuilder<COMPONENT_COUNT> {
+    pub fn allocate_array() -> [MaybeUninit<Component>; COMPONENT_COUNT] {
+        MaybeUninit::uninit_array()
+    }
+    pub fn new(array: &'static mut [MaybeUninit<Component>; COMPONENT_COUNT]) -> Self {
+        Self {
+            array,
+            space: COMPONENT_COUNT,
+        }
     }
     pub fn add_input_pin<T>(&mut self, gpio: &'static mut T) -> Result<(), ComponentError>
     where
         Gpio: FromRef<T>,
-        T: InputPin<Error = GpioInError>,
+        T: InputPin,
     {
-        for elem in self.0.iter_mut() {
-            if elem.is_none() {
-                elem.replace(Component::InputGpio(InputGpio(Gpio::from_ref(gpio), gpio)));
-                return Ok(());
-            }
+        if self.space > 0 {
+            self.space -= 1;
+            self.array[self.space].write(Component::InputGpio(InputGpio(gpio)));
+            Ok(())
+        } else {
+            Err(ComponentError::OOM)
         }
-        Err(ComponentError::OOM)
     }
     pub fn add_output_pin<T>(&mut self, gpio: &'static mut T) -> Result<(), ComponentError>
     where
         Gpio: FromRef<T>,
-        T: OutputPin<Error = GpioOutError>,
+        T: OutputPin,
     {
-        for elem in self.0.iter_mut() {
-            if elem.is_none() {
-                elem.replace(Component::OutputGpio(OutputGpio(
-                    Gpio::from_ref(gpio),
-                    gpio,
-                )));
-                return Ok(());
-            }
+        if self.space > 0 {
+            self.space -= 1;
+            self.array[self.space].write(Component::OutputGpio(OutputGpio(gpio)));
+            Ok(())
+        } else {
+            Err(ComponentError::OOM)
         }
-        Err(ComponentError::OOM)
     }
-    pub fn finalize(self) -> &'static mut Components {
-        self.0
-            .sort_unstable_by(|this, other| Component::comperator(this, other));
+    pub unsafe fn finalize(self) -> Result<&'static mut Components, ()> {
+        if self.space > 0 {
+            // the array has to be initialized completely
+            return Err(());
+        }
+        let array = MaybeUninit::slice_assume_init_mut(self.array);
+        array.sort_unstable_by(|this, other| Component::comparator(this, other));
         Components::static_array()
-            .set(self.0)
+            .set(array)
             .map_err(|_| Err::<(), ()>(()))
             .expect("Multible Component initialization");
-        Components::get_static()
+        Ok(Components::get_static())
     }
 }
 
 impl Components {
-    fn static_array() -> &'static mut OnceCell<&'static mut [Option<Component>]> {
-        static mut ARRAY: OnceCell<&mut [Option<Component>]> = OnceCell::new();
-        unsafe { &mut ARRAY }
+    unsafe fn static_array() -> &'static mut OnceCell<&'static mut [Component]> {
+        static mut ARRAY: OnceCell<&mut [Component]> = OnceCell::new();
+        &mut ARRAY
     }
-    fn get_static() -> &'static mut Self {
+    unsafe fn get_static() -> &'static mut Self {
         let array = Self::static_array()
             .get_mut()
             .expect("Tried to access uninitialized Components");
         // its the same pointer as the array pointer since the type representation of Self is 'transparent'
         // https://doc.rust-lang.org/1.41.1/reference/type-layout.html#representations
-        unsafe { &mut *(*array as *mut [Option<Component>] as *mut Self) }
+        &mut *(*array as *mut [Component] as *mut Self)
     }
-    fn get(index: ComponentIndex) -> Result<&'static mut Component, ComponentError> {
-        match Self::get_static().0[index.0 as usize].as_mut() {
-            Some(c) => Ok(c),
-            None => Err(ComponentError::NotFound),
-        }
+    unsafe fn get(index: ComponentIndex) -> Result<&'static mut Component, ComponentError> {
+        Ok(&mut Self::get_static().0[index.0 as usize])
     }
-    pub fn get_input_pin(pin: Pin, port: Port) -> Result<InputGpioIndex, ComponentError> {
+    pub unsafe fn get_input_pin(pin: Pin, port: Port) -> Result<InputGpioIndex, ComponentError> {
         let gpio = Gpio { pin, port };
         let index = Self::search_array(&gpio, Component::compare_with_gpio)?;
         // check if the gpio kind actually matches
         match Self::get_static().0[index] {
-            Some(Component::InputGpio(_)) => Ok(InputGpioIndex(ComponentIndex(index as u8))),
-            Some(_) => Err(ComponentError::NotFound),
-            None => Err(ComponentError::NotFound),
+            Component::InputGpio(_) => Ok(InputGpioIndex(ComponentIndex(index as u8))),
+            _ => Err(ComponentError::NotFound),
         }
     }
-    pub fn get_output_pin(pin: Pin, port: Port) -> Result<OutputGpioIndex, ComponentError> {
+    pub unsafe fn get_output_pin(pin: Pin, port: Port) -> Result<OutputGpioIndex, ComponentError> {
         let gpio = Gpio { pin, port };
         let index = Self::search_array(&gpio, Component::compare_with_gpio)?;
         // check if the gpio kind actually matches
         match Self::get_static().0[index] {
-            Some(Component::OutputGpio(_)) => Ok(OutputGpioIndex(ComponentIndex(index as u8))),
-            Some(_) => Err(ComponentError::NotFound),
-            None => Err(ComponentError::NotFound),
+            Component::OutputGpio(_) => Ok(OutputGpioIndex(ComponentIndex(index as u8))),
+            _ => Err(ComponentError::NotFound),
         }
     }
-    /// Search for a key in the component array, with a functin f that can conmpare the key with componetns
-    fn search_array<K>(
+    /// Search for a key in the component array, with a function f that can compare the key with components
+    unsafe fn search_array<K>(
         key: &K,
-        f: fn(&Option<Component>, &K) -> Ordering,
+        f: fn(&Component, &K) -> Ordering,
     ) -> Result<usize, ComponentError> {
         Self::get_static()
             .0
