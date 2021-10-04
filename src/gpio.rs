@@ -2,7 +2,7 @@ use embedded_hal::digital::v2;
 
 use crate::{
     device::{GpioInError, GpioOutError, Pin, Port},
-    ComponentError, ComponentIndex, Components,
+    ComponentError,
 };
 
 #[derive(PartialEq, Eq, Debug, Hash)]
@@ -10,12 +10,6 @@ pub enum GpioError {
     In(GpioInError),
     Out(GpioOutError),
 }
-
-#[derive(PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
-pub struct InputGpioIndex(pub(crate) ComponentIndex);
-
-#[derive(PartialEq, Eq, Debug, PartialOrd, Ord, Hash)]
-pub struct OutputGpioIndex(pub(crate) ComponentIndex);
 
 #[derive(PartialEq, Eq, Debug, Clone, PartialOrd, Ord, Hash)]
 pub struct Gpio {
@@ -31,47 +25,8 @@ pub trait OutputPin: v2::OutputPin<Error = GpioOutError> + ToGpio {}
 
 #[repr(transparent)]
 pub struct InputGpio(pub(crate) &'static mut dyn InputPin);
-pub struct OutputGpio(pub(crate) &'static mut dyn OutputPin<Error = GpioOutError>);
-
-impl InputGpioIndex {
-    pub unsafe fn is_high(&self) -> Result<bool, ComponentError> {
-        match Components::get(self.0)? {
-            crate::Component::InputGpio(gpio) => {
-                gpio.0.is_high().map_err(|e| GpioError::In(e).into())
-            }
-            _ => Err(ComponentError::NotFound),
-        }
-    }
-
-    pub unsafe fn is_low(&self) -> Result<bool, ComponentError> {
-        match Components::get(self.0)? {
-            crate::Component::InputGpio(gpio) => {
-                gpio.0.is_low().map_err(|e| GpioError::In(e).into())
-            }
-            _ => Err(ComponentError::NotFound),
-        }
-    }
-}
-
-impl OutputGpioIndex {
-    pub unsafe fn set_high(&self) -> Result<(), ComponentError> {
-        match Components::get(self.0)? {
-            crate::Component::OutputGpio(gpio) => {
-                gpio.0.set_high().map_err(|e| GpioError::In(e).into())
-            }
-            _ => Err(ComponentError::NotFound),
-        }
-    }
-
-    pub unsafe fn set_low(&self) -> Result<(), ComponentError> {
-        match Components::get(self.0)? {
-            crate::Component::OutputGpio(gpio) => {
-                gpio.0.set_low().map_err(|e| GpioError::In(e).into())
-            }
-            _ => Err(ComponentError::NotFound),
-        }
-    }
-}
+#[repr(transparent)]
+pub struct OutputGpio(pub(crate) &'static mut dyn OutputPin);
 
 // implement PartialEq, Eq, PartialOrd, Ord for $gpio_type
 macro_rules! implement_gpio_cmp_traits {
