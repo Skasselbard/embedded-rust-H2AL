@@ -37,6 +37,8 @@ pub enum Pin {
 // implements conversion from a hal pin into a Gpio e.g. from stm32f1xx_hal::gpio::gpioa::PA<T>
 macro_rules! implement_to_gpio {
     ($port:expr, $pin:expr, $hal_port:tt::$hal_pin:tt) => {
+        impl<T> crate::gpio::InputPin for gpio::$hal_port::$hal_pin<gpio::Input<T>> {}
+        impl<T> crate::gpio::OutputPin for gpio::$hal_port::$hal_pin<gpio::Output<T>> {}
         impl<T> ToGpio for gpio::$hal_port::$hal_pin<T> {
             #[inline]
             fn to_gpio(&self) -> Gpio {

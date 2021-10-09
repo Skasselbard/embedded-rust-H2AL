@@ -76,7 +76,7 @@ impl Component {
 }
 
 impl<const COMPONENT_COUNT: usize> ComponentsBuilder<COMPONENT_COUNT> {
-    pub fn allocate_array() -> [MaybeUninit<Component>; COMPONENT_COUNT] {
+    pub const fn allocate_array() -> [MaybeUninit<Component>; COMPONENT_COUNT] {
         MaybeUninit::uninit_array()
     }
     pub fn new(array: &'static mut [MaybeUninit<Component>; COMPONENT_COUNT]) -> Self {
