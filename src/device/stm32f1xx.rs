@@ -1,11 +1,71 @@
-use core::mem::transmute;
-
-use crate::gpio::{Gpio, ToGpio};
-use stm32f1xx_hal::gpio;
+use crate::events::{queue_event, Event};
+use crate::timer::ToTimerID;
+use crate::{
+    gpio::{GpioID, ToGpio},
+    timer::{Hertz, Timer},
+};
+use embedded_hal::timer::{Cancel, CountDown};
+use stm32f1xx_hal::pac::{TIM1, TIM2, TIM3};
+use stm32f1xx_hal::timer::CountDownTimer;
+use stm32f1xx_hal::{device::interrupt, gpio};
 
 pub type GpioOutError = core::convert::Infallible;
 pub type GpioInError = core::convert::Infallible;
+pub type TimerError = stm32f1xx_hal::timer::Error;
+pub type Time = stm32f1xx_hal::time::Hertz;
 
+pub(super) fn enable_interrupts() {
+    unsafe { cortex_m::interrupt::enable() };
+}
+pub(super) fn disable_interrupts() {
+    cortex_m::interrupt::disable();
+}
+#[derive(Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TimerID {
+    Tim1,
+    Tim2,
+    Tim3,
+}
+
+impl From<Hertz> for stm32f1xx_hal::time::Hertz {
+    fn from(source: Hertz) -> Self {
+        Self(source.0)
+    }
+}
+macro_rules! implement_timer {
+    ($timer:ty, $interrupt:ident, $id:expr) => {
+        impl Timer for CountDownTimer<$timer>
+        where
+            CountDownTimer<$timer>: ToTimerID,
+        {
+            #[inline]
+            fn start(&mut self, interval: Hertz) {
+                CountDown::start::<Hertz>(self, interval)
+            }
+            #[inline]
+            fn cancel(&mut self) -> Result<(), TimerError> {
+                Cancel::cancel(self)
+            }
+            #[inline]
+            fn wait(&mut self) -> Result<(), ()> {
+                CountDown::wait(self).map_err(|_| ())
+            }
+        }
+        impl ToTimerID for CountDownTimer<$timer> {
+            #[inline]
+            fn to_timer_id(&self) -> TimerID {
+                $id
+            }
+        }
+        #[interrupt]
+        fn $interrupt() {
+            queue_event(Event::TimerEvent($id));
+        }
+    };
+}
+implement_timer!(TIM1, TIM1_UP, TimerID::Tim1);
+implement_timer!(TIM2, TIM2, TimerID::Tim2);
+implement_timer!(TIM3, TIM3, TimerID::Tim3);
 #[derive(PartialEq, Eq, Clone, Copy, Debug, PartialOrd, Ord, Hash)]
 pub enum Port {
     A,
@@ -41,8 +101,8 @@ macro_rules! implement_to_gpio {
         impl<T> crate::gpio::OutputPin for gpio::$hal_port::$hal_pin<gpio::Output<T>> {}
         impl<T> ToGpio for gpio::$hal_port::$hal_pin<T> {
             #[inline]
-            fn to_gpio(&self) -> Gpio {
-                Gpio {
+            fn to_gpio(&self) -> GpioID {
+                GpioID {
                     port: $port,
                     pin: $pin,
                 }

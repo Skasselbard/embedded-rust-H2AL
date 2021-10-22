@@ -12,13 +12,13 @@ pub enum GpioError {
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, PartialOrd, Ord, Hash)]
-pub struct Gpio {
+pub struct GpioID {
     pub(super) port: Port,
     pub(super) pin: Pin,
 }
 
 pub trait ToGpio {
-    fn to_gpio(&self) -> Gpio;
+    fn to_gpio(&self) -> GpioID;
 }
 pub trait InputPin: v2::InputPin<Error = GpioInError> + ToGpio {}
 pub trait OutputPin: v2::OutputPin<Error = GpioOutError> + ToGpio {}
